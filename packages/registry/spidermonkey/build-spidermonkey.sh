@@ -253,9 +253,22 @@ PATCH_DIR="$SCRIPT_DIR/patches"
 if [ -d "$PATCH_DIR" ]; then
     for patch_file in "$PATCH_DIR"/*.patch; do
         [ -f "$patch_file" ] || continue
+        patch_name="$(basename "$patch_file")"
         if patch -p1 -N --dry-run --silent -d "$SRC_DIR" < "$patch_file" >/dev/null 2>&1; then
-            echo "==> Applying $(basename "$patch_file")..."
+            echo "==> Applying $patch_name..."
             patch -p1 -N -d "$SRC_DIR" < "$patch_file"
+        elif patch -p1 -R --dry-run --silent -d "$SRC_DIR" < "$patch_file" >/dev/null 2>&1; then
+            # Reverse-applies cleanly: this patch is already present in the
+            # source tree (e.g. a re-run against a previously patched
+            # checkout). Nothing to do.
+            echo "==> $patch_name already applied, skipping."
+        else
+            # Neither a forward nor a reverse dry-run succeeded: the patch
+            # does not cleanly apply to this source tree at all. Silently
+            # continuing here would ship a build missing a platform fix
+            # (e.g. 0015/0016/0017) with no signal that it was dropped.
+            echo "ERROR: patch $patch_name does not apply to $SRC_DIR (source may have drifted from what the patch expects). Update the patch or the pinned source version." >&2
+            exit 1
         fi
     done
 fi
@@ -330,6 +343,7 @@ ac_add_options --with-intl-api
 ac_add_options --enable-icu4x
 ac_add_options --disable-shared-js
 ac_add_options --enable-shared-memory
+ac_add_options --enable-explicit-resource-management
 ac_add_options --disable-clang-plugin
 ac_add_options --disable-tests
 ac_add_options --disable-debug-symbols

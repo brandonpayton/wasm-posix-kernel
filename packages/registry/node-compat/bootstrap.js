@@ -207,6 +207,15 @@ function _checkErrno(errno, syscall, path) {
     if (errno !== 0) _throwErrno(errno, syscall, path);
 }
 
+// Honest throwing stub for builtin surface we expose for link-time
+// completeness but have not implemented. Calling it fails loudly instead
+// of silently succeeding — see docs/posix-status.md for the tracked gap.
+function _notImpl(mod, name) {
+    return function () {
+        throw new Error(mod + '.' + name + ' is not implemented on spidermonkey-node');
+    };
+}
+
 // ============================================================
 // path module
 // ============================================================
@@ -471,6 +480,16 @@ const events = (() => {
     };
     return EventEmitter;
 })();
+
+// events.setMaxListeners(n, ...emitters) — Claude Code's undici transport
+// calls this at startup to raise the default cap; forward it to each
+// target emitter (or is a no-op for the process-wide default we don't
+// track separately).
+events.setMaxListeners = function (n, ...emitters) {
+    for (const em of emitters) {
+        if (em && typeof em.setMaxListeners === 'function') em.setMaxListeners(n);
+    }
+};
 
 // ============================================================
 // Buffer class
@@ -1733,6 +1752,10 @@ const fs = (() => {
         fchmodSync,
         fchownSync,
         futimesSync,
+        // No fsync/ftruncate primitive in the qjs:os native module (see
+        // truncateSync above) — honest throwing stubs, not silent no-ops.
+        fsyncSync: _notImpl('fs', 'fsyncSync'),
+        ftruncateSync: _notImpl('fs', 'ftruncateSync'),
         FileHandle,
         mkdtempSync,
 
@@ -1879,6 +1902,13 @@ const fs = (() => {
     mod.promises.fchown = async (fd, u, g) => fchownSync(fd, u, g);
     mod.promises.futimes = async (fd, a, m) => futimesSync(fd, a, m);
     mod.promises.open = async (p, flags, mode) => new FileHandle(openSync(p, flags, mode), _pathToString(p));
+    mod.promises.constants = constants;
+    // Throwing stubs: link-time completeness for the Claude Code import
+    // surface without a real implementation. See docs/posix-status.md.
+    mod.promises.link = _notImpl('fs/promises', 'link');
+    mod.promises.lutimes = _notImpl('fs/promises', 'lutimes');
+    mod.promises.opendir = _notImpl('fs/promises', 'opendir');
+    mod.promises.statfs = _notImpl('fs/promises', 'statfs');
 
     return mod;
 })();
@@ -1943,6 +1973,15 @@ const nodeOs = (() => {
         },
     };
 })();
+
+nodeOs.availableParallelism = function () {
+    try { return Math.max(1, (nodeOs.cpus && nodeOs.cpus().length) || 1); }
+    catch (_) { return 1; }
+};
+nodeOs.devNull = '/dev/null';
+nodeOs.version = function () { return ''; };
+nodeOs.getPriority = function () { return 0; };
+nodeOs.setPriority = function () { /* no-op */ };
 
 // ============================================================
 // util module
@@ -2109,6 +2148,19 @@ const util = (() => {
         isRegExp: v => v instanceof RegExp,
     };
 })();
+
+util.stripVTControlCharacters = function (s) {
+    return String(s).replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+};
+util.getSystemErrorName = function (err) {
+    const e = Math.abs(err | 0);
+    try {
+        const t = (nodeOs.constants && nodeOs.constants.errno) || {};
+        for (const k in t) if (Math.abs(t[k]) === e) return k;
+    } catch (_) { /* fall through to generic name */ }
+    return 'Unknown system error ' + err;
+};
+util.types.isProxy = function () { return false; };
 
 // ============================================================
 // assert module
@@ -2544,6 +2596,8 @@ const url = (() => {
     };
 })();
 
+url.domainToASCII = function (d) { return String(d); };
+
 // ============================================================
 // querystring module
 // ============================================================
@@ -2758,6 +2812,16 @@ const child_process = (() => {
     return { execSync, execFileSync, spawnSync, exec, execFile, spawn };
 })();
 
+// child_process.ChildProcess — spawn() above already returns an
+// EventEmitter-shaped object; this class exists for code that does
+// `instanceof ChildProcess` or subclasses it directly.
+child_process.ChildProcess = (function () {
+    function ChildProcess() { events.EventEmitter.call(this); }
+    ChildProcess.prototype = Object.create(events.EventEmitter.prototype);
+    ChildProcess.prototype.constructor = ChildProcess;
+    return ChildProcess;
+})();
+
 // ============================================================
 // crypto module (minimal)
 // ============================================================
@@ -2822,6 +2886,33 @@ const crypto = (() => {
             return buf;
         },
     };
+})();
+
+crypto.timingSafeEqual = function (a, b) {
+    a = Buffer.from(a);
+    b = Buffer.from(b);
+    if (a.length !== b.length) throw new RangeError('Input buffers must have the same byte length');
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+    return diff === 0;
+};
+// Throwing stubs: no libcrypto cipher/asymmetric-key surface wired through
+// the wasm sysroot yet. See docs/posix-status.md.
+crypto.randomFillSync = _notImpl('crypto', 'randomFillSync');
+crypto.createCipheriv = _notImpl('crypto', 'createCipheriv');
+crypto.createDecipheriv = _notImpl('crypto', 'createDecipheriv');
+crypto.createPrivateKey = _notImpl('crypto', 'createPrivateKey');
+crypto.createPublicKey = _notImpl('crypto', 'createPublicKey');
+crypto.generateKeyPairSync = _notImpl('crypto', 'generateKeyPairSync');
+crypto.sign = _notImpl('crypto', 'sign');
+crypto.verify = _notImpl('crypto', 'verify');
+// Constructable class stub: throws only when actually instantiated, so
+// `import { X509Certificate } from "crypto"` still links.
+crypto.X509Certificate = (function () {
+    function X509Certificate() {
+        throw new Error('crypto.X509Certificate is not implemented on spidermonkey-node');
+    }
+    return X509Certificate;
 })();
 
 // ============================================================
@@ -2980,6 +3071,17 @@ const net = (() => {
     };
 })();
 
+// net.BlockList — no-op class stub (used with `new net.BlockList()` and
+// instanceof checks); check() always reports "not blocked".
+net.BlockList = (function () {
+    function BlockList() {}
+    BlockList.prototype.addAddress = function () {};
+    BlockList.prototype.addRange = function () {};
+    BlockList.prototype.addSubnet = function () {};
+    BlockList.prototype.check = function () { return false; };
+    return BlockList;
+})();
+
 // ============================================================
 // tls module — TLSSocket via libssl in the wasm sysroot
 // ============================================================
@@ -3115,6 +3217,12 @@ const tls = (() => {
 
     return { connect, TLSSocket };
 })();
+
+// No bundled CA store or pluggable SecureContext surface — tlsConnect
+// (libssl in the wasm sysroot) manages certificate verification itself.
+tls.rootCertificates = [];
+tls.checkServerIdentity = function () { return undefined; };
+tls.createSecureContext = _notImpl('tls', 'createSecureContext');
 
 // ============================================================
 // http / https modules — real HTTP/1.1 over net.Socket (http) and tls.TLSSocket (https)
@@ -3903,16 +4011,68 @@ const _builtinModules = {
         }
         // minipass-fetch / tar instantiate via `new zlib.Gunzip()` / `new zlib.Unzip()`.
         class Gunzip extends ZlibTransform { constructor(opts) { super(z.createGunzip(), opts); } }
+        // Node's Unzip auto-detects a zlib or gzip header. The native backend's
+        // createGunzip already sniffs both (windowBits 47 / auto), so Unzip is
+        // backed by it too.
         class Unzip extends ZlibTransform { constructor(opts) { super(z.createGunzip(), opts); } }
+        // Brotli: there is no Brotli codec in the native backend (patch 0012
+        // wires libz only, no libbrotli). Provide an honest fail-loud stream:
+        // it constructs (so module-init that builds a Brotli stream succeeds)
+        // but errors on the first byte of data instead of silently returning
+        // wrong bytes. Real Brotli is tracked future work (docs/posix-status.md).
+        const _brotliMsg = 'zlib Brotli is not implemented on spidermonkey-node';
+        class BrotliUnsupported extends stream.Transform {
+            _transform(_chunk, _enc, cb) { cb(new Error(_brotliMsg)); }
+        }
+        // Real Node zlib/Brotli numeric constants. Only Z_SYNC_FLUSH and
+        // BROTLI_OPERATION_FLUSH are read by the app today, but expose the
+        // standard set so consumers that read other flush/level/param codes
+        // work. Values match Node's zlib.constants.
+        const constants = {
+            Z_NO_FLUSH: 0, Z_PARTIAL_FLUSH: 1, Z_SYNC_FLUSH: 2, Z_FULL_FLUSH: 3,
+            Z_FINISH: 4, Z_BLOCK: 5, Z_TREES: 6,
+            Z_OK: 0, Z_STREAM_END: 1, Z_NEED_DICT: 2, Z_ERRNO: -1,
+            Z_STREAM_ERROR: -2, Z_DATA_ERROR: -3, Z_MEM_ERROR: -4,
+            Z_BUF_ERROR: -5, Z_VERSION_ERROR: -6,
+            Z_NO_COMPRESSION: 0, Z_BEST_SPEED: 1, Z_BEST_COMPRESSION: 9,
+            Z_DEFAULT_COMPRESSION: -1,
+            Z_FILTERED: 1, Z_HUFFMAN_ONLY: 2, Z_RLE: 3, Z_FIXED: 4,
+            Z_DEFAULT_STRATEGY: 0,
+            Z_BINARY: 0, Z_TEXT: 1, Z_ASCII: 1, Z_UNKNOWN: 2,
+            Z_DEFLATED: 8,
+            Z_DEFAULT_CHUNK: 16384, Z_MIN_CHUNK: 64, Z_MAX_CHUNK: Infinity,
+            Z_DEFAULT_LEVEL: -1, Z_MIN_LEVEL: -1, Z_MAX_LEVEL: 9,
+            Z_DEFAULT_MEMLEVEL: 8, Z_MIN_MEMLEVEL: 1, Z_MAX_MEMLEVEL: 9,
+            Z_MIN_WINDOWBITS: 8, Z_MAX_WINDOWBITS: 15, Z_DEFAULT_WINDOWBITS: 15,
+            BROTLI_OPERATION_PROCESS: 0, BROTLI_OPERATION_FLUSH: 1,
+            BROTLI_OPERATION_FINISH: 2, BROTLI_OPERATION_EMIT_METADATA: 3,
+            BROTLI_PARAM_MODE: 0, BROTLI_MODE_GENERIC: 0, BROTLI_MODE_TEXT: 1,
+            BROTLI_MODE_FONT: 2, BROTLI_PARAM_QUALITY: 1, BROTLI_PARAM_LGWIN: 2,
+            BROTLI_PARAM_LGBLOCK: 3,
+            BROTLI_PARAM_DISABLE_LITERAL_CONTEXT_MODELING: 4,
+            BROTLI_PARAM_SIZE_HINT: 5, BROTLI_PARAM_LARGE_WINDOW: 6,
+            BROTLI_PARAM_NPOSTFIX: 7, BROTLI_PARAM_NDIRECT: 8,
+            BROTLI_MIN_QUALITY: 0, BROTLI_MAX_QUALITY: 11, BROTLI_DEFAULT_QUALITY: 11,
+            BROTLI_MIN_WINDOW_BITS: 10, BROTLI_MAX_WINDOW_BITS: 24,
+            BROTLI_DEFAULT_WINDOW: 22, BROTLI_LARGE_MAX_WINDOW_BITS: 30,
+            BROTLI_MIN_INPUT_BLOCK_BITS: 16, BROTLI_MAX_INPUT_BLOCK_BITS: 24,
+        };
         return {
             createGzip:    (opts) => new ZlibTransform(z.createGzip(opts?.level), opts),
             createGunzip:  (opts) => new Gunzip(opts),
+            createUnzip:   (opts) => new Unzip(opts),
             createDeflate: (opts) => new ZlibTransform(z.createDeflate(opts?.level), opts),
             createInflate: (opts) => new ZlibTransform(z.createInflate(), opts),
             gzipSync:    (b, opts) => Buffer.from(z.gzipSync(toU8(b), opts?.level)),
             gunzipSync:  (b)       => Buffer.from(z.gunzipSync(toU8(b))),
             deflateSync: (b, opts) => Buffer.from(z.deflateSync(toU8(b), opts?.level)),
             inflateSync: (b)       => Buffer.from(z.inflateSync(toU8(b))),
+            // Brotli: honest fail-loud stubs (construct OK, error on data).
+            createBrotliCompress:   (opts) => new BrotliUnsupported(opts),
+            createBrotliDecompress: (opts) => new BrotliUnsupported(opts),
+            brotliCompressSync:   _notImpl('zlib', 'brotliCompressSync'),
+            brotliDecompressSync: _notImpl('zlib', 'brotliDecompressSync'),
+            constants,
             Gunzip, Unzip,
         };
     })(),
@@ -4160,6 +4320,94 @@ const _builtinModules = {
     },
 };
 
+// ------------------------------------------------------------
+// Post-registration: builtin exports added for the Claude Code link
+// surface (Milestone 2 Phase A, task 1). These mutate the module
+// objects/registry entries built above rather than restructure the
+// `_builtinModules` object literal, mirroring the `stream/web` patch
+// further down (search for `_builtinModules['stream/web']`).
+// ------------------------------------------------------------
+_builtinModules['path/posix'] = path.posix;
+// `path/win32` mirrors `path/posix`: cross-platform code (e.g. Claude Code's
+// shell-detection chunk) statically imports both variants and only *calls*
+// the win32 one under `process.platform === 'win32'` guards, which are false
+// on Kandelo (platform is `linux`). The subpath must still resolve for the
+// static import. `path.win32` is a POSIX approximation with `sep: '\\'` (see
+// its definition above); real win32 path semantics are tracked future work
+// (docs/posix-status.md, node-compat approximate implementations).
+_builtinModules['path/win32'] = path.win32;
+
+const _dnsPromises = { lookup: util.promisify(_builtinModules['dns'].lookup) };
+_builtinModules['dns'].promises = _dnsPromises;
+_builtinModules['dns/promises'] = _dnsPromises;
+
+// `ws` — the WebSocket npm package. Bun ships a native ws-compatible module,
+// so Bun-bundled apps (Claude Code) mark `ws` external and expect the runtime
+// to provide it; it is not in the bundle or the package. node-compat is that
+// runtime layer, so it provides `ws` here. This is a MINIMAL honest module:
+// the module object IS the `WebSocket` class (real ws's `module.exports`), so
+// `import WebSocket from "ws"` and `require("ws")` resolve and the class,
+// static ready-state constants, `instanceof`, and subclassing all work at
+// module scope; but *constructing a live WebSocket throws* -- real WebSocket
+// I/O over TLS is tracked future work (docs/posix-status.md). Verified via a
+// scope probe: `claude -p` imports `ws` but never opens a socket, so this
+// unblocks it without faking WebSocket behavior. Graduating this to a full,
+// real ws client/server is the deferred follow-up.
+_builtinModules['ws'] = (() => {
+    function WebSocket() {
+        throw new Error('ws (WebSocket client) is not implemented on spidermonkey-node');
+    }
+    // Static ready-state constants (read at module scope by consumers).
+    WebSocket.CONNECTING = 0;
+    WebSocket.OPEN = 1;
+    WebSocket.CLOSING = 2;
+    WebSocket.CLOSED = 3;
+    function WebSocketServer() {
+        throw new Error('ws (WebSocketServer) is not implemented on spidermonkey-node');
+    }
+    function createWebSocketStream() {
+        throw new Error('ws (createWebSocketStream) is not implemented on spidermonkey-node');
+    }
+    // real ws attaches these onto the exported WebSocket function.
+    WebSocket.WebSocket = WebSocket;
+    WebSocket.WebSocketServer = WebSocketServer;
+    WebSocket.Server = WebSocketServer;
+    WebSocket.createWebSocketStream = createWebSocketStream;
+    return WebSocket;
+})();
+
+_builtinModules['perf_hooks'].monitorEventLoopDelay = function () {
+    return {
+        enable() {}, disable() {}, reset() {},
+        percentile() { return 0; },
+        get min() { return 0; },
+        get max() { return 0; },
+        get mean() { return 0; },
+        get stddev() { return 0; },
+        get exceeds() { return 0; },
+    };
+};
+
+// zlib: async callback wrappers over the existing *Sync implementations,
+// plus throwing stubs for the raw-inflate and zstd codecs (not wired
+// through the wasm sysroot's libz binding).
+_builtinModules['zlib'].deflate = function (buf, opts, cb) {
+    if (typeof opts === 'function') { cb = opts; opts = undefined; }
+    try {
+        const out = _builtinModules['zlib'].deflateSync(buf, opts);
+        queueMicrotask(() => cb(null, out));
+    } catch (e) { queueMicrotask(() => cb(e)); }
+};
+_builtinModules['zlib'].inflate = function (buf, opts, cb) {
+    if (typeof opts === 'function') { cb = opts; opts = undefined; }
+    try {
+        const out = _builtinModules['zlib'].inflateSync(buf);
+        queueMicrotask(() => cb(null, out));
+    } catch (e) { queueMicrotask(() => cb(e)); }
+};
+_builtinModules['zlib'].inflateRawSync = _notImpl('zlib', 'inflateRawSync');
+_builtinModules['zlib'].createZstdDecompress = _notImpl('zlib', 'createZstdDecompress');
+
 // Node exposes `node:module` as the CJS Module class itself: a
 // constructor that doubles as the namespace for createRequire / _cache
 // / _nodeModulePaths / etc., with a self-ref `Module.Module === Module`.
@@ -4358,6 +4606,30 @@ function _makeRequire(filename) {
             const exports = JSON.parse(source);
             _moduleCache[resolved] = { exports };
             return exports;
+        }
+
+        // ESM target: an ES module cannot be CJS-wrapped (its top-level
+        // import/export declarations are only valid in module goal, so the
+        // wrapper below throws "import declarations may only appear at top
+        // level of a module"). Route it through the native module loader so it
+        // is CompileModule'd and shares one instance (dedup-safe via the
+        // per-path registry) with import and dynamic import(), then return its
+        // namespace -- Node require(esm) semantics (named exports as props,
+        // default as .default). A ".cjs" file is always CommonJS regardless of
+        // the nearest package "type", so it keeps the CJS wrapper below.
+        if ((resolved.endsWith('.mjs') || _nearestPackageType(resolved) === 'module') && !resolved.endsWith('.cjs')) {
+            // Pass the pre-realpath `resolvedPath`, not the realpath'd
+            // `resolved`, to the native seam. The shell ModuleLoader keys its
+            // per-path registry by a purely *lexical* normalizePath (no symlink
+            // resolution), and `import`/dynamic `import()` reach it with the
+            // same pre-realpath specifier path. Realpath'ing here would key the
+            // registry differently from import under a symlinked module dir and
+            // double-instantiate the module, defeating the shared-instance
+            // dedup. The JS-side `_moduleCache` stays realpath-keyed (its own
+            // cache, consistent with the check above).
+            const ns = _nodeNative.__kandeloRequireModule(resolvedPath);
+            _moduleCache[resolved] = { exports: ns };
+            return ns;
         }
 
         // Create module object
@@ -4584,6 +4856,152 @@ globalThis.require = _makeRequire(
         ? process.argv[1]
         : process.cwd() + '/repl'
 );
+
+// --- Native ESM bare-specifier bridge ---------------------------------------
+// The SpiderMonkey shell module loader resolves every import specifier as a
+// file path. A bare specifier such as `import ... from "fs"` therefore becomes
+// `//fs` and fails with "can't open //fs". Node treats a bare specifier (one
+// that does not start with "./", "../", or "/") as a builtin or a node_modules
+// package. We route those through the existing node-compat resolver so that a
+// natively-loaded ES module receives the same object `require()` would return.
+//
+// The C shell loader (js/src/shell/ModuleLoader.cpp, patched via
+// patches/0015-kandelo-esm-bare-specifier.patch) calls __kandeloResolveBare for
+// any bare specifier. We return a synthetic module *path* (a stable token) and
+// stash the generated ES-module source in __kandeloBareSources under that same
+// token; the loader's fetchSource() serves it instead of reading a file. The
+// synthetic source reads the real module object back out of __kandeloBareModules
+// so the namespace's `default` and named exports are live references to the
+// object require() produced. All namespace generation stays here in JS.
+globalThis.__kandeloBareModules = Object.create(null);
+globalThis.__kandeloBareSources = Object.create(null);
+
+// Identifiers that cannot appear after `export const` (reserved words). Own
+// enumerable keys that collide with these are exposed only via the default
+// export, matching the safe subset Node's ESM interop provides for CJS.
+const _esmReservedNames = new Set([
+    'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger',
+    'default', 'delete', 'do', 'else', 'enum', 'export', 'extends', 'false',
+    'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof', 'new',
+    'null', 'return', 'super', 'switch', 'this', 'throw', 'true', 'try',
+    'typeof', 'var', 'void', 'while', 'with', 'yield', 'let', 'static',
+    'implements', 'interface', 'package', 'private', 'protected', 'public',
+    'await',
+]);
+
+function _makeBareEsmSource(token, obj) {
+    const keyJson = JSON.stringify(token);
+    let src = 'const __m = globalThis.__kandeloBareModules[' + keyJson + '];\n' +
+        'export default __m;\n';
+    if (obj !== null && (typeof obj === 'object' || typeof obj === 'function')) {
+        const seen = Object.create(null);
+        let keys;
+        try {
+            keys = Object.keys(obj);
+        } catch (_e) {
+            keys = [];
+        }
+        for (const key of keys) {
+            if (key === 'default') continue;
+            if (seen[key]) continue;
+            if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key)) continue;
+            if (_esmReservedNames.has(key)) continue;
+            seen[key] = true;
+            src += 'export const ' + key + ' = __m[' + JSON.stringify(key) + '];\n';
+        }
+    }
+    return src;
+}
+
+globalThis.__kandeloResolveBare = function (specifier, referrerPath) {
+    if (typeof specifier !== 'string' || specifier.length === 0) return null;
+    // Only bare specifiers reach here, but guard against relative/absolute in
+    // case a caller passes them: those are not our responsibility.
+    if (specifier.startsWith('./') || specifier.startsWith('../') ||
+        specifier.startsWith('/')) {
+        return null;
+    }
+
+    let bareName = specifier;
+    if (bareName.startsWith('node:')) bareName = bareName.slice(5);
+
+    let token;
+    let obj;
+    if (_builtinModules[bareName] !== undefined) {
+        // Node builtin (with or without the `node:` prefix). Dedup `fs` and
+        // `node:fs` onto a single synthetic module.
+        token = '/__kandelo_bare__/builtin/' + bareName;
+        obj = _builtinModules[bareName];
+    } else {
+        // node_modules package. Resolve the concrete file so the token (and the
+        // native loader's module registry) dedups by real path, then load the
+        // object through the ordinary node-compat require so CJS interop and the
+        // process-global module cache apply.
+        const base = (typeof referrerPath === 'string' && referrerPath.length > 0)
+            ? referrerPath
+            : (process.cwd() + '/repl');
+        const basedir = path.dirname(base);
+        let resolvedPath = null;
+        try {
+            resolvedPath = _resolveFile(specifier, basedir);
+        } catch (_e) {
+            resolvedPath = null;
+        }
+        if (!resolvedPath) return null;
+
+        // ESM target: hand the real path back to the native loader so it
+        // CompileModules the file (dedup-safe via the native per-path module
+        // registry) instead of CJS-wrapping it as a classic script. A CJS
+        // wrapper (`_makeRequire`) evaluates the file body as a plain
+        // function, so a top-level `import` declaration inside it throws
+        // "import declarations may only appear at top level of a module".
+        // Returning an absolute path here is handled natively by
+        // ModuleLoader.cpp (confirmed: absolute paths bypass the bare-token
+        // synthesis below and are read + compiled as a module directly).
+        if ((resolvedPath.endsWith('.mjs') || _nearestPackageType(resolvedPath) === 'module') && !resolvedPath.endsWith('.cjs')) {
+            return resolvedPath;
+        }
+
+        token = '/__kandelo_bare__/pkg' + resolvedPath;
+        try {
+            obj = _makeRequire(base)(specifier);
+        } catch (_e) {
+            return null;
+        }
+    }
+
+    if (globalThis.__kandeloBareSources[token] === undefined) {
+        globalThis.__kandeloBareModules[token] = obj;
+        globalThis.__kandeloBareSources[token] = _makeBareEsmSource(token, obj);
+    }
+    return token;
+};
+
+// The native ES-module metadata hook (SpiderMonkey shell ModuleLoader.cpp,
+// patches/0016-kandelo-import-meta.patch) calls __kandeloModuleMeta with the
+// resolved module path and copies the returned url/dirname/require onto
+// import.meta. This is the NATIVE import() module system's import.meta — it is
+// distinct from _runEsmMain's regex-based import.meta.url string replacement.
+// Extracted Bun apps read import.meta.require and import.meta.dirname, so
+// populating them here lets those apps run without any source rewriting.
+// Returning null lets the C hook keep its default (url = raw path) behavior so
+// an unresolvable path stays a visible boundary rather than a silent success.
+globalThis.__kandeloModuleMeta = function (resolvedPath) {
+    if (typeof resolvedPath !== 'string' || resolvedPath.length === 0) {
+        return null;
+    }
+    let href;
+    try {
+        href = url.pathToFileURL(resolvedPath).href;
+    } catch (_e) {
+        return null;
+    }
+    return {
+        url: href,
+        dirname: path.dirname(resolvedPath),
+        require: _makeRequire(resolvedPath),
+    };
+};
 
 // Node.js globals
 globalThis.process = process;

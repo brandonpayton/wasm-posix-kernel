@@ -369,6 +369,12 @@
         },
         decodeUtf8(bytes) { return decodeUtf8(bytes); },
         jsonParse(text) { return nativeJsonParse(text); },
+        __kandeloRequireModule(path) {
+            if (typeof native.__kandeloRequireModule !== 'function') {
+                throw new Error('native __kandeloRequireModule is unavailable');
+            }
+            return native.__kandeloRequireModule(path);
+        },
         setRawMode(fd, raw) { if (typeof native.setRawMode === 'function') return native.setRawMode(fd, raw); },
         createHash(algorithm) { return native.createHash(algorithm); },
         createHmac(algorithm, key) { return native.createHmac(algorithm, key); },
