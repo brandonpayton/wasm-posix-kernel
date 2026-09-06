@@ -1,8 +1,12 @@
-// Network popup — the three steps that connect two Kandelo computers.
+// Network popup — the exchange that connects two Kandelo computers.
 //
-// The humans carry the codes: one side creates an invite, the other answers
-// it, the first completes. Both codes are plain text so they travel through
-// whatever chat window the two people already share.
+// With a signalling server configured, the pair shares a session name and
+// the server carries the codes: one side hosts the name, the other joins
+// it. The manual exchange stays underneath it, because it is the one flow
+// that needs nobody: the humans carry the codes, one side creates an
+// invite, the other answers it, the first completes. Both codes are plain
+// text so they travel through whatever chat window the two people already
+// share.
 
 import * as React from "react";
 import type { MachineHandover } from "./machine-handover";
@@ -263,49 +267,96 @@ export const NetworkPopup: React.FC<{
     );
   }
 
+  const manualExchange = (
+    <>
+      <div className="knetwork-steps">
+        {/* Each computer is shown one side of the exchange, decided by
+            whether it runs a machine. Inviting means offering a machine, so
+            a computer running none has nothing to invite anyone to; and a
+            computer already running one has something to offer, so answering
+            someone else's invite is not the step in front of it. Showing
+            both sides to either computer offers two ways to start and makes
+            the pair agree by hand on which of them is which. */}
+        {hasMachine ? (
+          <>
+            <button
+              type="button"
+              className="knetwork-button"
+              onClick={session.createInvite}
+            >
+              Create invite code
+            </button>
+            <button
+              type="button"
+              className="knetwork-button"
+              onClick={session.completeConnection}
+            >
+              Complete connection
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            className="knetwork-button"
+            onClick={session.answerInvite}
+          >
+            Answer invite
+          </button>
+        )}
+      </div>
+
+      {hasMachine ? localCodeSection : remoteCodeSection}
+      {hasMachine ? remoteCodeSection : localCodeSection}
+    </>
+  );
+
   return (
     <div className="knetwork-popup">
       <section className="knetwork-section">
         <div className="knetwork-label">Connect another computer</div>
-        <div className="knetwork-steps">
-          {/* Each computer is shown one side of the exchange, decided by
-              whether it runs a machine. Inviting means offering a machine, so
-              a computer running none has nothing to invite anyone to; and a
-              computer already running one has something to offer, so answering
-              someone else's invite is not the step in front of it. Showing
-              both sides to either computer offers two ways to start and makes
-              the pair agree by hand on which of them is which. */}
-          {hasMachine ? (
-            <>
+        {session.signalling ? (
+          <>
+            <label className="knetwork-label" htmlFor="knetwork-session">
+              Session name — the words the two of you agreed on
+            </label>
+            <input
+              id="knetwork-session"
+              className="knetwork-name"
+              type="text"
+              spellCheck={false}
+              value={session.sessionName}
+              placeholder="lucky-orange-lantern"
+              onChange={(event) => session.setSessionName(event.target.value)}
+            />
+            <div className="knetwork-steps">
+              {/* The same one-side-each split as the manual exchange: the
+                  computer with a machine hosts the name, the empty one joins
+                  it. */}
               <button
                 type="button"
                 className="knetwork-button"
-                onClick={session.createInvite}
+                onClick={hasMachine ? session.hostSession : session.joinSession}
               >
-                Create invite code
+                {hasMachine ? "Host this session" : "Join this session"}
               </button>
-              <button
-                type="button"
-                className="knetwork-button"
-                onClick={session.completeConnection}
-              >
-                Complete connection
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              className="knetwork-button"
-              onClick={session.answerInvite}
-            >
-              Answer invite
-            </button>
-          )}
-        </div>
+            </div>
+          </>
+        ) : (
+          manualExchange
+        )}
       </section>
 
-      {hasMachine ? localCodeSection : remoteCodeSection}
-      {hasMachine ? remoteCodeSection : localCodeSection}
+      {/* The name flow needs its server; carrying the codes by hand needs
+          nobody, so it stays reachable underneath for the day the server
+          does not answer. */}
+      {session.signalling && (
+        <details className="knetwork-manual">
+          <summary className="knetwork-label">
+            Exchange the codes by hand instead
+          </summary>
+          {manualExchange}
+        </details>
+      )}
 
       <div className="knetwork-status" role="status">{session.status}</div>
     </div>

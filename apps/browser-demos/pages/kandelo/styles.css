@@ -4836,6 +4836,27 @@
   word-break: break-all;
 }
 
+.knetwork-name {
+  padding: 8px;
+  border: 1px solid var(--k-border);
+  border-radius: 8px;
+  background: var(--k-surface);
+  color: var(--k-text);
+  font-family: var(--k-font-mono, monospace);
+  font-size: 12px;
+}
+
+.knetwork-manual {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.knetwork-manual > summary {
+  cursor: pointer;
+}
+
 .knetwork-status,
 .knetwork-take-note,
 .knetwork-replication-note {
